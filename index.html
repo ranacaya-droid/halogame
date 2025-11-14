@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Student Game Arcade</title>
+    <!-- Google Fonts for Arcade Style --><link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+    <!-- TailwindCSS (for styling) --><script src="https://cdn.tailwindcss.com"></script>
+    <!-- Vue.js (for app logic) --><script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    
+    <!-- 3. Firebase SDKs (MODERN v11 SDKs) --><script type="module">
+        //
+        // ----- STEP 1: USE CANVAS ENVIRONMENT CONFIG -----
+        //
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        let db, auth, gamesCollection;
+        let userId, appId;
+
+        // Use Canvas environment variables
+        const firebaseConfig = typeof __firebase_config !== 'undefined' 
+            ? JSON.parse(__firebase_config) 
+            : { apiKey: "PLACEHOLDER", authDomain: "PLACEHOLDER", projectId: "PLACEHOLDER" }; // Fallback
+        
+        appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        
+        // ----------------------------------------------------
+
+        // Initialize Firebase
+        try {
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            setLogLevel('debug'); // Enable debug logging for Firestore
+
+        } catch (e) {
+            console.error("Firebase initialization error:", e);
+            displayFirebaseError();
+        }
+
+        function displayFirebaseError() {
+            if (!document.querySelector('#firebase-error')) {
+                const errorDiv = document.createElement('div');
+                errorDiv.id = 'firebase-error';
+                errorDiv.style = "position:fixed; top:10px; left:10px; right:10px; padding:20px; background:red; color:white; font-weight:bold; z-index:1000;";
+                errorDiv.innerText = "Firebase is not configured correctly. Please ensure environment variables are set.";
+                document.body.prepend(errorDiv);
+            }
+        }
+
+        // This is our Vue.js Application
+        const { createApp } = Vue
+
+        function setupVueApp() {
+            createApp({
+                data() {
+                    return {
+                        page: 'home', // 'home', 'grade', 'admin'
+                        currentGrade: null, // 'K', '1', etc.
+                        games: [], // This will hold all games from Firebase
+                        form: {
+                            gameName: '',
+                            creatorName: '', // <-- ADDED
+                            gradeLevel: '',
+                            topic: '',
+                            standard: '',
+                            description: '',
+                            gameLink: '',
+                            thumbnailUrl: ''
+                        },
+                        showAlert: false,
+                        alertTitle: '',
+                        alertMessage: '',
+                        isAuthReady: false // Track if authentication is complete
+                    }
+                },
+                
+                computed: {
+                    // This magic function filters the games list
+                    filteredGames() {
+                        if (!this.currentGrade) return [];
+                        return this.games.filter(game => game.gradeLevel === this.currentGrade);
+                    }
+                },
+
+                methods: {
+                    // Simple navigation
+                    goHome() {
+                        this.page = 'home';
+                        this.currentGrade = null;
+                    },
+                    goToGrade(grade) {
+                        this.currentGrade = grade;
+                        this.page = 'grade';
+                    },
+                    
+                    // Password check for admin
+                    goToAdmin() {
+                        const pass = prompt('Enter the student password:');
+                        if (pass === 'halo2026') {
+                            this.page = 'admin';
+                        } else if (pass !== null && pass !== '') { // Only show alert if they typed something wrong
+                            this.customAlert('ERROR!', 'INCORRECT PASSWORD!');
+                        }
+                    },
+
+                    // Custom alert modal instead of window.alert()
+                    customAlert(title, message) {
+                        this.alertTitle = title;
+                        this.alertMessage = message;
+                        this.showAlert = true;
+                    },
+
+                    // Sets up a listener that waits for auth to be ready
+                    setupAuthListener() {
+                        if (!auth) {
+                            console.warn("Firebase Auth not initialized.");
+                            this.customAlert('Error', 'Firebase Auth service is not available.');
+                            return;
+                        }
+
+                        onAuthStateChanged(auth, async (user) => {
+                            if (user) {
+                                // User is signed in.
+                                userId = user.uid;
+                                console.log('Auth state changed, user signed in:', userId);
+                                
+                                // SET THE CORRECT FIRESTORE PATH
+                                const collectionPath = `/artifacts/${appId}/public/data/games`;
+                                console.log("Using Firestore collection path:", collectionPath);
+                                gamesCollection = collection(db, collectionPath);
+                                
+                                this.isAuthReady = true; // Mark auth as complete
+                                this.fetchGames(); // Now it's safe to fetch games.
+                            } else {
+                                // User is signed out. Try to sign them in.
+                                console.log('Auth state changed, user signed out. Attempting sign-in...');
+                                try {
+                                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                                        console.log("Signing in with custom token...");
+                                        await signInWithCustomToken(auth, __initial_auth_token);
+                                    } else {
+                                        console.log("Signing in anonymously...");
+                                        await signInAnonymously(auth);
+                                    }
+                                } catch (error) {
+                                    console.error('Sign-in failed:', error);
+                                    this.customAlert('AUTHENTICATION ERROR', 'COULD NOT CONNECT TO THE DATABASE.');
+                                }
+                            }
+                        });
+                    },
+                    
+                    // Submit the form to Firebase
+                    async submitGame() {
+                        if (!gamesCollection) {
+                            this.customAlert('ERROR!', 'DATABASE IS NOT CONNECTED.');
+                            return;
+                        }
+                        
+                        // Simple form validation
+                        for (const key in this.form) {
+                            if (this.form[key].trim() === '') {
+                                this.customAlert('WARNING!', 'PLEASE FILL OUT ALL FIELDS!');
+                                return;
+                            }
+                        }
+
+                        try {
+                            // Add a new 'document' (a game) to the 'games' collection
+                            await addDoc(gamesCollection, {
+                                ...this.form,
+                                createdAt: serverTimestamp() // Adds a timestamp
+                            });
+                            
+                            this.customAlert('SUCCESS!', 'YOUR GAME HAS BEEN ADDED TO THE ARCADE!');
+                            
+                            // Clear the form
+                            this.form = {
+                                gameName: '', 
+                                creatorName: '', // <-- ADDED
+                                gradeLevel: '', 
+                                topic: '', 
+                                standard: '', 
+                                description: '', 
+                                gameLink: '', 
+                                thumbnailUrl: ''
+                            };
+                            
+                            // Go back to the homepage
+                            this.goHome();
+
+                        } catch (error) {
+                            console.error("Error adding document: ", error);
+                            this.customAlert('OH NO!', 'SOMETHING WENT WRONG. CHECK CONSOLE (F12).');
+                        }
+                    },
+                    
+                    // Fetch all games from Firebase in real-time
+                    fetchGames() {
+                        if (!this.isAuthReady || !gamesCollection) {
+                            console.warn("fetchGames called, but auth is not ready or collection is not set. Aborting.");
+                            return;
+                        }
+
+                        const q = query(gamesCollection, orderBy('createdAt', 'desc'));
+                        
+                        onSnapshot(q, (snapshot) => {
+                            this.games = snapshot.docs.map(doc => ({
+                                id: doc.id,
+                                ...doc.data()
+                            }));
+                            console.log("Games fetched successfully:", this.games.length);
+                        }, error => {
+                            console.error("Error fetching games: ", error);
+                            this.customAlert('DATABASE ERROR', 'COULD NOT FETCH GAMES. PERMISSIONS ISSUE?');
+                        });
+                    }
+                },
+                
+                // This runs when the app first loads
+                mounted() {
+                    // Start the auth listener.
+                    // It will automatically sign in and then call fetchGames().
+                    this.setupAuthListener();
+                }
+            }).mount('#app')
+        }
+
+        // Only run if Firebase successfully initialized
+        if (db && auth) {
+            setupVueApp();
+        } else {
+            console.error("Cannot start Vue app, Firebase initialization failed.");
+            displayFirebaseError();
+        }
+    </script>
+
+    <style>
+        /* General Arcade Theme Styles */
+        body {
+            font-family: 'VT323', monospace; /* Default monospace for text */
+            background-color: #0d0d21; /* Darker blue-purple */
+            background-image: 
+                radial-gradient(ellipse at center, rgba(30, 0, 60, 0.4) 0%, rgba(0, 0, 0, 0.8) 100%),
+                url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100"><rect x="0" y="0" width="100" height="100" fill="%230d0d21"/><circle cx="50" cy="50" r="1" fill="%231a1a3a" opacity="0.5"/></svg>'); /* Subtle grid/dots */
+            background-size: 100%, 10px 10px;
+            color: #E0E0FF; /* Light blue-purple for general text */
+            scroll-behavior: smooth;
+        }
+
+        h1, h2, h3 {
+            font-family: 'Press Start 2P', cursive; /* Pixel font for titles */
+            color: #FFC0CB; /* Hot Pink */
+            text-shadow: 2px 2px #8A2BE2; /* Purple shadow */
+        }
+        
+        button {
+            font-family: 'Press Start 2P', cursive;
+            text-shadow: 1px 1px #000;
+        }
+
+        .arcade-btn {
+            background-color: #FF1493; /* Deep Pink */
+            color: #FFFFFF;
+            border: 4px solid #8A2BE2; /* BlueViolet */
+            box-shadow: 0 5px 0 #4B0082, /* Indigo */
+                        0 0 15px rgba(255, 20, 147, 0.7); /* DeepPink glow */
+            transition: all 0.1s ease-out;
+            border-radius: 8px; /* Slightly rounded for arcade feel */
+        }
+        .arcade-btn:hover {
+            transform: translateY(2px);
+            box-shadow: 0 2px 0 #4B0082,
+                        0 0 20px rgba(255, 20, 147, 1);
+            background-color: #FF69B4; /* Hot Pink */
+        }
+        .arcade-btn:active {
+            transform: translateY(5px);
+            box-shadow: 0 0 0 #4B0082;
+        }
+
+        .grade-box {
+            background-color: #1a1a3a; /* Darker blue */
+            border: 4px solid #00FFFF; /* Cyan glow */
+            box-shadow: 0 0 15px rgba(0, 255, 255, 0.6), inset 0 0 10px rgba(0, 255, 255, 0.3);
+            transition: all 0.2s ease-out;
+            cursor: pointer;
+            border-radius: 12px;
+            color: #00FFFF; /* Cyan */
+        }
+        .grade-box:hover {
+            transform: scale(1.05);
+            background-color: #2a2a5a;
+            box-shadow: 0 0 25px rgba(0, 255, 255, 0.9), inset 0 0 15px rgba(0, 255, 255, 0.5);
+        }
+        .grade-box:active {
+            transform: scale(0.98);
+        }
+
+        .game-card {
+            background-color: #000000; /* Black for screen effect */
+            border: 5px solid #00FFFF; /* Cyan border */
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.5); /* Cyan glow */
+            border-radius: 12px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            transition: all 0.2s ease-out;
+            position: relative;
+        }
+        .game-card:hover {
+            transform: translateY(-8px) scale(1.02);
+            box-shadow: 0 0 30px rgba(0, 255, 255, 0.8), 0 8px 15px rgba(0,0,0,0.5);
+        }
+        .game-card img {
+            border-bottom: 3px solid #00FFFF; /* Separation line */
+        }
+        .game-card .p-6 {
+            background: 
+                linear-gradient(to bottom, rgba(0,0,0,0.8) 0%, rgba(0,0,0,0.95) 100%),
+                url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50" viewBox="0 0 50 50"><rect x="0" y="0" width="50" height="50" fill="%23000000"/><line x1="0" y1="0" x2="50" y2="50" stroke="%2300FFFF" stroke-width="0.5" opacity="0.1"/><line x1="50" y1="0" x2="0" y2="50" stroke="%2300FFFF" stroke-width="0.5" opacity="0.1"/></svg>'); /* Subtle scanlines/grid */
+            background-size: 100%, 50px 50px;
+            color: #E0E0FF;
+            text-shadow: 1px 1px #000;
+        }
+        .game-card h3 {
+            color: #FFD700; /* Gold for game titles */
+            text-shadow: 2px 2px #FF8C00; /* DarkOrange shadow */
+        }
+        .game-card p {
+            color: #90EE90; /* LightGreen for description */
+        }
+        .game-card .text-indigo-600 { /* Topic color */
+            color: #FF69B4 !important; /* Hot Pink */
+        }
+        .game-card .bg-gray-50 { /* Footer for standard */
+            background-color: #0a0a20 !important; /* Dark blue */
+            border-top: 2px solid #00FFFF !important;
+            color: #00FFFF !important; /* Cyan */
+        }
+
+        .form-input-arcade {
+            background-color: #000000;
+            border: 2px solid #00FFFF;
+            color: #00FF00; /* Green text for input */
+            font-family: 'VT323', monospace;
+            padding: 8px 12px;
+            border-radius: 6px;
+            box-shadow: inset 0 0 8px rgba(0, 255, 0, 0.4);
+        }
+        .form-input-arcade:focus {
+            outline: none;
+            border-color: #FFD700; /* Gold on focus */
+            box-shadow: inset 0 0 12px rgba(255, 215, 0, 0.6), 0 0 5px rgba(255, 215, 0, 0.8);
+        }
+        .form-input-arcade::placeholder {
+            color: #008000; /* Darker green placeholder */
+        }
+        .form-label-arcade {
+            color: #00FFFF; /* Cyan labels */
+            font-family: 'Press Start 2P', cursive;
+            font-size: 0.85rem;
+            text-shadow: 1px 1px #000;
+        }
+
+        .modal-arcade {
+            background-color: #1a1a3a;
+            border: 5px solid #FF1493; /* Deep Pink */
+            box-shadow: 0 0 25px rgba(255, 20, 147, 0.7);
+            border-radius: 12px;
+            color: #00FFFF;
+        }
+        .modal-arcade h3 {
+            color: #FFD700; /* Gold */
+            text-shadow: 2px 2px #FF8C00;
+        }
+        .modal-arcade button {
+            background-color: #00FF00; /* Green button */
+            border: 3px solid #008000;
+            color: #000000;
+            text-shadow: none;
+            box-shadow: 0 3px 0 #008000;
+        }
+        .modal-arcade button:hover {
+            background-color: #32CD32; /* LimeGreen */
+            transform: translateY(1px);
+            box-shadow: 0 2px 0 #008000;
+        }
+        .modal-arcade button:active {
+            transform: translateY(3px);
+            box-shadow: 0 0 0 #008000;
+        }
+
+        /* Override Tailwind defaults for arcade feel */
+        select.form-input-arcade {
+            background-image: url("data:image/svg+xml;charset=US-ASCII,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath fill='%2300FF00' d='M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 6.757 7.586 5.343 9z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 0.7em top 50%, 0 0;
+            background-size: 0.8em auto, 100%;
+        }
+        
+    </style>
+</head>
+<body class="antialiased">
+
+    <div id="app" class="container mx-auto p-4 md:p-8 max-w-7xl relative z-10">
+
+        <!-- Navigation Header --><header class="flex flex-col sm:flex-row justify-between items-center mb-8 pb-4 border-b-4 border-cyan-500 relative">
+            <h1 class="text-3xl md:text-5xl cursor-pointer text-center sm:text-left mb-4 sm:mb-0" @click="goHome()">
+                🎮 ARCADE ALLEY
+            </h1>
+            <button @click="goToAdmin()" class="arcade-btn py-3 px-6 text-xl">
+                STUDENT PORTAL
+            </button>
+             <div class="absolute inset-x-0 bottom-0 h-1 bg-gradient-to-r from-pink-500 via-purple-500 to-blue-500 opacity-75"></div>
+        </header>
+
+        <main class="relative z-10">
+            <!-- 
+              ==========================
+              HOME PAGE (Grade Levels)
+              ========================== 
+            --><div v-if="page === 'home'">
+                <h2 class="text-2xl md:text-4xl text-center sm:text-left mb-8 mt-4">SELECT YOUR GAME ZONE</h2>
+                <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-6 md:gap-8">
+                    <!-- Grade Level Boxes --><div v-for="grade in ['K', '1', '2', '3', '4', '5', '6']" 
+                         @click="goToGrade(grade)"
+                         class="grade-box p-8 sm:p-12 text-center font-bold text-5xl md:text-6xl uppercase">
+                        LEVEL {{ grade }}
+                    </div>
+                </div>
+            </div>
+
+            <!-- 
+              ==========================
+              GRADE PAGE (Game Cards)
+              ========================== 
+            --><div v-if="page === 'grade'">
+                <button @click="goHome()" class="arcade-btn text-lg py-2 px-4 mb-8">
+                    &larr; BACK TO ARCADE ALLEY
+                </button>
+                <h2 class="text-2xl md:text-4xl mb-8">GAMES FOR LEVEL {{ currentGrade }}</h2>
+                
+                <!-- Show loading/empty message --><div vv-if="!isAuthReady" class="text-center text-cyan-400 py-16 bg-black bg-opacity-50 rounded-lg shadow-lg border border-cyan-500">
+                    <p class="text-2xl md:text-3xl animate-pulse">LOADING GAMES...</p>
+                    <p class="text-lg mt-4">(INITIATING SYSTEM PROTOCOLS)</p>
+                </div>
+                <div v-else-if="filteredGames.length === 0" class="text-center text-pink-400 py-16 bg-black bg-opacity-50 rounded-lg shadow-lg border border-pink-500">
+                    <p class="text-3xl md:text-4xl">NO GAMES FOUND HERE!</p>
+                    <p class="text-xl mt-4">BE THE FIRST TO ADD ONE!</p>
+                </div>
+
+                <!-- Grid of Game Cards --><div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 md:gap-8">
+                    <div v-for="game in filteredGames" :key="game.id" 
+                         class="game-card">
+                        
+                        <!-- Clickable Link (wraps the image) --><a :href="game.gameLink" target="_blank" class="block" rel="noopener noreferrer">
+                            <!-- Fallback for broken images --><img :src="game.thumbnailUrl" 
+                                 @error="($event.target.src='https://placehold.co/600x400/000000/00FF00?text=GAME+OVER%0AIMG+MISSING&font=Press+Start+2P')"
+                                 alt="Game Thumbnail" 
+                                 class="w-full h-48 object-cover object-center border-b-4 border-purple-600 hover:opacity-80 transition-opacity">
+                        </a>
+
+                        <div class="p-6 flex-grow">
+                            <h3 class="text-xl md:text-2xl mb-2">{{ game.gameName }}</h3>
+                            <p class="text-lg text-cyan-400 mb-2 -mt-2">BY: {{ game.creatorName }}</p> <!-- <-- ADDED -->
+                            <p class="text-sm font-semibold mb-2">TOPIC: <span class="text-pink-400">{{ game.topic }}</span></p>
+                            <p class="text-base leading-relaxed">{{ game.description }}</p>
+                        </div>
+                        <div class="p-4 md:p-6 text-sm">
+                             <p class="uppercase">STANDARD: <span class="text-cyan-400">{{ game.standard }}</span></p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 
+              ==========================
+              ADMIN PAGE (Submit Form)
+              ========================== 
+            --><div v-if="page === 'admin'">
+                <h2 class="text-2xl md:text-4xl text-center mb-8">SUBMIT YOUR MASTERPIECE!</h2>
+                
+                <form @submit.prevent="submitGame" class="w-full max-w-lg bg-black bg-opacity-70 p-8 rounded-lg shadow-xl mx-auto border-4 border-lime-500">
+                    <!-- Game Name --><div class="mb-5">
+                        <label class="form-label-arcade mb-2 block" for="gameName">
+                            GAME NAME:
+                        </label>
+                        <input v-model="form.gameName" class="form-input-arcade w-full" id="gameName" type="text" placeholder="MY AWESOME GAME TITLE" required>
+                    </div>
+
+                    <!-- Creator Name --><div class="mb-5">
+                        <label class="form-label-arcade mb-2 block" for="creatorName">
+                            CREATOR NAME:
+                        </label>
+                        <input v-model="form.creatorName" class="form-input-arcade w-full" id="creatorName" type="text" placeholder="E.G., 'PLAYER ONE' OR YOUR NAME" required>
+                    </div>
+
+                    <!-- Grade Level --><div class="mb-5">
+                        <label class="form-label-arcade mb-2 block" for="gradeLevel">
+                            GRADE LEVEL:
+                        </label>
+                        <select v-model="form.gradeLevel" id="gradeLevel" class="form-input-arcade w-full" required>
+                            <option value="">-- SELECT A LEVEL --</option>
+                            <option value="K">K - KINDERGARTEN</option>
+                            <option value="1">1 - GRADE 1</option>
+                            <option value="2">2 - GRADE 2</option>
+                            <option value="3">3 - GRADE 3</option>
+                            <option value="4">4 - GRADE 4</option>
+                            <option value="5">5 - GRADE 5</option>
+                            <option value="6">6 - GRADE 6</option>
+                        </select>
+                    </div>
+
+                    <!-- Topic --><div class="mb-5">
+                        <label class="form-label-arcade mb-2 block" for="topic">
+                            TOPIC / LESSON:
+                        </label>
+                        <input v-model="form.topic" class="form-input-arcade w-full" id="topic" type="text" placeholder="E.G., ADDITION, PHOTOSYNTHESIS" required>
+                    </div>
+
+                    <!-- Standard --><div class="mb-5">
+                        <label class="form-label-arcade mb-2 block" for="standard">
+                            STANDARD:
+                        </label>
+                        <input v-model="form.standard" class="form-input-arcade w-full" id="standard" type="text" placeholder="E.G., CCSS.MATH.CONTENT.1.OA.A.1" required>
+                    </div>
+
+                    <!-- Description --><div class="mb-5">
+                        <label class="form-label-arcade mb-2 block" for="description">
+                            DESCRIPTION OF GAME:
+                        </label>
+                        <textarea v-model="form.description" class="form-input-arcade w-full" id="description" rows="4" placeholder="A SHORT DESCRIPTION OF HOW TO PLAY." required></textarea>
+                    </div>
+                    
+                    <hr class="my-8 border-purple-500 border-dashed">
+
+                    <!-- Game Link --><div class="mb-5">
+                        <label class="form-label-arcade mb-2 block" for="gameLink">
+                            GAME LINK (URL):
+                        </label>
+                        <input v-model="form.gameLink" class="form-input-arcade w-full" id="gameLink" type="url" placeholder="HTTPS://YOUR-GAME-HERE.COM" required>
+                    </div>
+
+                    <!-- Thumbnail URL --><div class="mb-8">
+                        <label class="form-label-arcade mb-2 block" for="thumbnailUrl">
+                            THUMBNAIL IMAGE URL:
+                        </label>
+                        <input v-model="form.thumbnailUrl" class="form-input-arcade w-full" id="thumbnailUrl" type="url" placeholder="HTTPS://I.IMGUR.COM/YOUR-IMAGE.PNG" required>
+                        <p class="text-xs text-green-400 mt-2">
+                            UPLOAD YOUR IMAGE TO <a href="https://imgur.com/upload" target="_blank" class="text-blue-400 hover:underline" rel="noopener noreferrer">IMGUR.COM</a> AND PASTE THE LINK.
+                        </p>
+                    </div>
+
+                    <!-- Submit Button --><div class="flex items-center justify-center mt-8">
+                        <button class="arcade-btn py-4 px-8 text-2xl uppercase" type="submit">
+                            SUBMIT GAME!
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </main>
+
+        <!-- Custom Modal for Alerts (Arcade Style) --><div v-if="showAlert" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
+            <div class="modal-arcade p-8 w-full max-w-lg text-center">
+                <h3 class="text-3xl mb-4">{{ alertTitle }}</h3>
+                <p class="text-xl leading-relaxed mb-8">{{ alertMessage }}</p>
+                <button @click="showAlert = false" class="arcade-btn py-3 px-6 text-xl">
+                    CONTINUE
+                </button>
+            </div>
+        </div>
+
+    </div> <!-- End #app --></body>
+</html>
