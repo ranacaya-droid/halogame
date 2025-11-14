@@ -14,17 +14,28 @@
         //
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        // NOTE: Removed orderBy from imports as we are sorting on the client side to avoid index requirement issues.
+        import { getFirestore, collection, addDoc, query, onSnapshot, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         let db, auth, gamesCollection;
         let userId, appId;
 
         // Use Canvas environment variables
-        const firebaseConfig = typeof __firebase_config !== 'undefined' 
-            ? JSON.parse(__firebase_config) 
-            : { apiKey: "PLACEHOLDER", authDomain: "PLACEHOLDER", projectId: "PLACEHOLDER" }; // Fallback
+        // --- START MANUAL CONFIG INJECTION ---
+        // Your custom firebaseConfig object is hardcoded here to bypass environment variable issues.
+        const firebaseConfig = {
+            apiKey: "AIzaSyAe4r7Yu7QmJef8fJwNULlNpJDLznqO-G0",
+            authDomain: "game-website-6de78.firebaseapp.com",
+            projectId: "game-website-6de78",
+            storageBucket: "game-website-6de78.firebasestorage.app",
+            messagingSenderId: "1074785918112",
+            appId: "1:1074785918112:web:4d5398e4ddabc674993dc5",
+            measurementId: "G-E3D0SDXQWW"
+        };
         
-        appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        // We use the projectId for the application path identifier (appId)
+        appId = firebaseConfig.projectId;
+        // --- END MANUAL CONFIG INJECTION ---
         
         // ----------------------------------------------------
 
@@ -138,16 +149,13 @@
                                 // User is signed out. Try to sign them in.
                                 console.log('Auth state changed, user signed out. Attempting sign-in...');
                                 try {
-                                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                                        console.log("Signing in with custom token...");
-                                        await signInWithCustomToken(auth, __initial_auth_token);
-                                    } else {
-                                        console.log("Signing in anonymously...");
-                                        await signInAnonymously(auth);
-                                    }
+                                    // FIX: Since we are using a manually provided config, we must sign in anonymously
+                                    // and ignore the potentially mismatched __initial_auth_token.
+                                    await signInAnonymously(auth);
                                 } catch (error) {
                                     console.error('Sign-in failed:', error);
-                                    this.customAlert('AUTHENTICATION ERROR', 'COULD NOT CONNECT TO THE DATABASE.');
+                                    // This error is often a network failure or Anonymous Auth not enabled.
+                                    this.customAlert('AUTHENTICATION ERROR', 'COULD NOT CONNECT TO THE DATABASE. Ensure Anonymous Auth is enabled in your Firebase project.');
                                 }
                             }
                         });
@@ -205,17 +213,31 @@
                             return;
                         }
 
-                        const q = query(gamesCollection, orderBy('createdAt', 'desc'));
+                        // We rely on client-side sorting now to avoid index issues.
+                        const q = query(gamesCollection);
                         
                         onSnapshot(q, (snapshot) => {
                             this.games = snapshot.docs.map(doc => ({
                                 id: doc.id,
                                 ...doc.data()
                             }));
+                            
+                            // Client-side sorting: Sort by createdAt timestamp (descending)
+                            this.games.sort((a, b) => {
+                                // Use the 'seconds' property of the Firebase Timestamp object for comparison
+                                const timeA = a.createdAt?.seconds || 0;
+                                const timeB = b.createdAt?.seconds || 0;
+                                return timeB - timeA; // Descending order (newest first)
+                            });
+
                             console.log("Games fetched successfully:", this.games.length);
                         }, error => {
                             console.error("Error fetching games: ", error);
-                            this.customAlert('DATABASE ERROR', 'COULD NOT FETCH GAMES. PERMISSIONS ISSUE?');
+                            // --- EXPLICIT SECURITY RULE FIX HINT ---
+                            this.customAlert(
+                                'PERMISSION ERROR', 
+                                'COULD NOT FETCH GAMES. This is a FIRESTORE SECURITY RULE issue. Ensure your rule allows authenticated users (request.auth != null) to READ the public data path (/artifacts/{appId}/public/data/games).'
+                            );
                         });
                     }
                 },
@@ -444,7 +466,7 @@
                 </button>
                 <h2 class="text-2xl md:text-4xl mb-8">GAMES FOR LEVEL {{ currentGrade }}</h2>
                 
-                <!-- Show loading/empty message --><div vv-if="!isAuthReady" class="text-center text-cyan-400 py-16 bg-black bg-opacity-50 rounded-lg shadow-lg border border-cyan-500">
+                <!-- Show loading/empty message --><div v-if="!isAuthReady" class="text-center text-cyan-400 py-16 bg-black bg-opacity-50 rounded-lg shadow-lg border border-cyan-500">
                     <p class="text-2xl md:text-3xl animate-pulse">LOADING GAMES...</p>
                     <p class="text-lg mt-4">(INITIATING SYSTEM PROTOCOLS)</p>
                 </div>
