@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
+    <meta charset="UTF-R">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Student Game Arcade</title>
     <!-- Google Fonts for Arcade Style --><link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
@@ -14,8 +14,11 @@
         //
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        // NOTE: Removed orderBy from imports as we are sorting on the client side to avoid index requirement issues.
-        import { getFirestore, collection, addDoc, query, onSnapshot, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        // *** ADDED doc, updateDoc, and deleteDoc for new admin features ***
+        import { 
+            getFirestore, collection, addDoc, query, onSnapshot, 
+            serverTimestamp, setLogLevel, doc, updateDoc, deleteDoc 
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         let db, auth, gamesCollection;
         let userId, appId;
@@ -68,28 +71,37 @@
             createApp({
                 data() {
                     return {
-                        page: 'home', // 'home', 'grade' (subjects), 'gamesList', 'admin'
+                        page: 'home', // 'home', 'grade', 'gamesList', 'admin', 'adminManage'
                         currentGrade: null, // 'K', '1', etc.
                         currentSubject: null, // 'Science', 'Mathematics', 'ELA'
                         games: [], // This will hold all games from Firebase
                         subjects: ['Science', 'Mathematics', 'ELA'], // Subject list
                         
-                        // Admin page state
+                        // Student admin page state
                         adminStep: 1, // 1: grade, 2: subject, 3: form
                         currentAdminGrade: null,
                         currentAdminSubject: null,
 
-                        form: {
+                        form: { // For NEW game submissions
                             gameName: '',
                             creatorName: '', 
                             gradeLevel: '',
-                            subject: '', // <-- ADDED
+                            subject: '',
                             topic: '',
                             standard: '',
                             description: '',
                             gameLink: '',
                             thumbnailUrl: ''
                         },
+                        
+                        // Admin-only state
+                        isAdmin: false,
+                        isEditing: false,
+                        gameToEdit: null, // Holds game data for the edit modal
+                        isDeleting: false,
+                        gameToDelete: null, // Holds game data for the delete modal
+
+                        // General app state
                         showAlert: false,
                         alertTitle: '',
                         alertMessage: '',
@@ -98,7 +110,7 @@
                 },
                 
                 computed: {
-                    // This magic function filters the games list
+                    // This magic function filters the games list for students
                     filteredGames() {
                         if (!this.currentGrade || !this.currentSubject) return [];
                         // Filter by both grade AND subject
@@ -115,10 +127,10 @@
                         this.page = 'home';
                         this.currentGrade = null;
                         this.currentSubject = null;
-                        // Reset admin state too
                         this.adminStep = 1;
                         this.currentAdminGrade = null;
                         this.currentAdminSubject = null;
+                        // Do NOT log out admin here, they might just be browsing
                     },
                     goToGrade(grade) {
                         this.currentGrade = grade;
@@ -129,18 +141,34 @@
                         this.page = 'gamesList'; // This is the new page for showing games
                     },
                     
-                    // Password check for admin
-                    goToAdmin() {
-                        const pass = prompt('Enter the student password:');
-                        if (pass === 'halo2026') {
-                            this.page = 'admin';
-                            this.adminStep = 1; // Start at step 1
+                    // *** RENAMED *** Password check for both portals
+                    goToPortalLogin() {
+                        const pass = prompt('Enter your portal password:');
+                        if (pass === 'admin2026') { // Admin Password
+                            this.isAdmin = true;
+                            this.page = 'adminManage'; // Go to new admin manage page
+                        } else if (pass === 'halo2026') { // Student Password
+                            this.isAdmin = false; // Ensure admin is false
+                            this.page = 'admin'; // Go to student submit flow
+                            this.adminStep = 1; // Start student flow
                         } else if (pass !== null && pass !== '') { // Only show alert if they typed something wrong
                             this.customAlert('ERROR!', 'INCORRECT PASSWORD!');
                         }
                     },
 
-                    // Admin Page Step Methods
+                    // *** NEW *** Admin-only: Log out
+                    logoutAdmin() {
+                        this.isAdmin = false;
+                        this.goHome();
+                    },
+
+                    // *** NEW *** Admin-only: Go to student form from admin panel
+                    goToStudentForm() {
+                        this.page = 'admin'; // Re-use the student form
+                        this.adminStep = 1;
+                    },
+
+                    // Student Portal Step Methods
                     adminSelectGrade(grade) {
                         this.currentAdminGrade = grade;
                         this.adminStep = 2; // Move to subject selection
@@ -198,19 +226,16 @@
                                 // User is signed out. Try to sign them in.
                                 console.log('Auth state changed, user signed out. Attempting sign-in...');
                                 try {
-                                    // FIX: Since we are using a manually provided config, we must sign in anonymously
-                                    // and ignore the potentially mismatched __initial_auth_token.
                                     await signInAnonymously(auth);
                                 } catch (error) {
                                     console.error('Sign-in failed:', error);
-                                    // This error is often a network failure or Anonymous Auth not enabled.
                                     this.customAlert('AUTHENTICATION ERROR', 'COULD NOT CONNECT TO THE DATABASE. Ensure Anonymous Auth is enabled in your Firebase project.');
                                 }
                             }
                         });
                     },
                     
-                    // Submit the form to Firebase
+                    // Submit the STUDENT form to Firebase
                     async submitGame() {
                         if (!gamesCollection) {
                             this.customAlert('ERROR!', 'DATABASE IS NOT CONNECTED.');
@@ -226,7 +251,6 @@
                         }
 
                         try {
-                            // Add a new 'document' (a game) to the 'games' collection
                             await addDoc(gamesCollection, {
                                 ...this.form,
                                 createdAt: serverTimestamp() // Adds a timestamp
@@ -239,7 +263,7 @@
                                 gameName: '', 
                                 creatorName: '', 
                                 gradeLevel: '', 
-                                subject: '', // <-- ADDED
+                                subject: '',
                                 topic: '', 
                                 standard: '', 
                                 description: '', 
@@ -263,7 +287,6 @@
                             return;
                         }
 
-                        // We rely on client-side sorting now to avoid index issues.
                         const q = query(gamesCollection);
                         
                         onSnapshot(q, (snapshot) => {
@@ -274,7 +297,6 @@
                             
                             // Client-side sorting: Sort by createdAt timestamp (descending)
                             this.games.sort((a, b) => {
-                                // Use the 'seconds' property of the Firebase Timestamp object for comparison
                                 const timeA = a.createdAt?.seconds || 0;
                                 const timeB = b.createdAt?.seconds || 0;
                                 return timeB - timeA; // Descending order (newest first)
@@ -283,13 +305,86 @@
                             console.log("Games fetched successfully:", this.games.length);
                         }, error => {
                             console.error("Error fetching games: ", error);
-                            // --- EXPLICIT SECURITY RULE FIX HINT ---
                             this.customAlert(
                                 'PERMISSION ERROR', 
                                 'COULD NOT FETCH GAMES. This is a FIRESTORE SECURITY RULE issue. Ensure your rule allows authenticated users (request.auth != null) to READ the public data path (/artifacts/{appId}/public/data/games).'
                             );
                         });
+                    },
+
+                    // *** NEW *** Admin-only: Open the edit modal
+                    openEditModal(game) {
+                        // Create a deep copy to avoid modifying the list data directly
+                        // This way, "Cancel" works as expected
+                        this.gameToEdit = JSON.parse(JSON.stringify(game));
+                        this.isEditing = true;
+                    },
+
+                    // *** NEW *** Admin-only: Close the edit modal
+                    closeEditModal() {
+                        this.isEditing = false;
+                        this.gameToEdit = null;
+                    },
+
+                    // *** NEW *** Admin-only: Submit the edited game data
+                    async submitGameEdit() {
+                        if (!this.gameToEdit || !this.gameToEdit.id) {
+                            this.customAlert('Error', 'No game selected for editing.');
+                            return;
+                        }
+
+                        // Create a copy of the data for Firestore, removing the 'id' field
+                        const gameData = { ...this.gameToEdit };
+                        const gameId = gameData.id;
+                        delete gameData.id; // Firestore update data shouldn't contain the 'id'
+                        
+                        // We won't change createdAt, but we will add an 'updatedAt' timestamp
+                        delete gameData.createdAt; 
+                        gameData.updatedAt = serverTimestamp();
+
+                        try {
+                            const gameRef = doc(db, gamesCollection.path, gameId);
+                            await updateDoc(gameRef, gameData);
+                            
+                            this.customAlert('Success!', 'Game has been updated.');
+                            this.closeEditModal();
+                        } catch (error) {
+                            console.error("Error updating document: ", error);
+                            this.customAlert('Error', 'Could not update game. Check console.');
+                        }
+                    },
+
+                    // *** NEW *** Admin-only: Open the delete confirmation modal
+                    openDeleteModal(game) {
+                        this.gameToDelete = game;
+                        this.isDeleting = true;
+                    },
+
+                    // *** NEW *** Admin-only: Close the delete confirmation modal
+                    closeDeleteModal() {
+                        this.isDeleting = false;
+                        this.gameToDelete = null;
+                    },
+
+                    // *** NEW *** Admin-only: Confirm and delete the game
+                    async confirmDeleteGame() {
+                        if (!this.gameToDelete || !this.gameToDelete.id) {
+                            this.customAlert('Error', 'No game selected for deletion.');
+                            return;
+                        }
+
+                        try {
+                            const gameRef = doc(db, gamesCollection.path, this.gameToDelete.id);
+                            await deleteDoc(gameRef);
+
+                            this.customAlert('Success!', `'${this.gameToDelete.gameName}' has been deleted.`);
+                            this.closeDeleteModal();
+                        } catch (error) {
+                            console.error("Error deleting document: ", error);
+                            this.customAlert('Error', 'Could not delete game. Check console.');
+                        }
                     }
+
                 },
                 
                 // This runs when the app first loads
@@ -353,6 +448,16 @@
             transform: translateY(5px);
             box-shadow: 0 0 0 #4B0082;
         }
+        /* Custom button colors for new actions */
+        .arcade-btn.bg-red-600 { background-color: #DC2626; border-color: #7F1D1D; box-shadow: 0 5px 0 #7F1D1D; }
+        .arcade-btn.bg-red-600:hover { background-color: #EF4444; box-shadow: 0 2px 0 #7F1D1D; }
+        .arcade-btn.bg-blue-600 { background-color: #2563EB; border-color: #1E3A8A; box-shadow: 0 5px 0 #1E3A8A; }
+        .arcade-btn.bg-blue-600:hover { background-color: #3B82F6; box-shadow: 0 2px 0 #1E3A8A; }
+        .arcade-btn.bg-green-600 { background-color: #16A34A; border-color: #14532D; box-shadow: 0 5px 0 #14532D; }
+        .arcade-btn.bg-green-600:hover { background-color: #22C55E; box-shadow: 0 2px 0 #14532D; }
+        .arcade-btn.bg-gray-600 { background-color: #4B5563; border-color: #1F2937; box-shadow: 0 5px 0 #1F2937; }
+        .arcade-btn.bg-gray-600:hover { background-color: #6B7280; box-shadow: 0 2px 0 #1F2937; }
+
 
         /* Style for Grade and Subject boxes */
         .grade-box {
@@ -372,7 +477,6 @@
         .grade-box:active {
             transform: scale(0.98);
         }
-        /* Subject boxes can use the same style, but we'll make them taller */
         .subject-box {
             background-color: #1a1a3a;
             border: 4px solid #FFD700; /* Gold glow */
@@ -451,6 +555,7 @@
             padding: 8px 12px;
             border-radius: 6px;
             box-shadow: inset 0 0 8px rgba(0, 255, 0, 0.4);
+            font-size: 1.1rem; /* Make form text a bit bigger */
         }
         .form-input-arcade:focus {
             outline: none;
@@ -487,20 +592,7 @@
             text-shadow: 2px 2px #FF8C00;
         }
         .modal-arcade button {
-            background-color: #00FF00; /* Green button */
-            border: 3px solid #008000;
-            color: #000000;
-            text-shadow: none;
-            box-shadow: 0 3px 0 #008000;
-        }
-        .modal-arcade button:hover {
-            background-color: #32CD32; /* LimeGreen */
-            transform: translateY(1px);
-            box-shadow: 0 2px 0 #008000;
-        }
-        .modal-arcade button:active {
-            transform: translateY(3px);
-            box-shadow: 0 0 0 #008000;
+            /* Use arcade-btn classes by default */
         }
 
         /* Override Tailwind defaults for arcade feel */
@@ -521,8 +613,8 @@
             <h1 class="text-3xl md:text-5xl cursor-pointer text-center sm:text-left mb-4 sm:mb-0" @click="goHome()">
                 🎮 ARCADE ALLEY
             </h1>
-            <button @click="goToAdmin()" class="arcade-btn py-3 px-6 text-xl">
-                STUDENT PORTAL
+            <button @click="goToPortalLogin()" class="arcade-btn py-3 px-6 text-xl">
+                CONTRIBUTOR PORTAL
             </button>
              <div class="absolute inset-x-0 bottom-0 h-1 bg-gradient-to-r from-pink-500 via-purple-500 to-blue-500 opacity-75"></div>
         </header>
@@ -545,7 +637,7 @@
 
             <!-- 
               ==========================
-              GRADE PAGE (Subject Select) - NEW
+              GRADE PAGE (Subject Select)
               ========================== 
             --><div v-if="page === 'grade'">
                 <button @click="goHome()" class="arcade-btn text-lg py-2 px-4 mb-8">
@@ -564,7 +656,7 @@
 
             <!-- 
               ==========================
-              GAMES LIST PAGE (Game Cards) - NEW
+              GAMES LIST PAGE (Game Cards)
               ========================== 
             --><div v-if="page === 'gamesList'">
                 <!-- Back button goes to subject select -->
@@ -611,13 +703,13 @@
 
             <!-- 
               ==========================
-              ADMIN PAGE (3-Step Wizard)
+              STUDENT ADMIN PAGE (3-Step Wizard)
               ========================== 
             --><div v-if="page === 'admin'">
                 
                 <!-- STEP 1: Select Grade -->
                 <div v-if="adminStep === 1">
-                    <h2 class="text-2xl md:text-4xl text-center mb-8">ADMIN STEP 1: SELECT GRADE</h2>
+                    <h2 class="text-2xl md:text-4xl text-center mb-8">STUDENT: STEP 1/3: SELECT GRADE</h2>
                     <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-6 md:gap-8">
                         <div v-for="grade in ['K', '1', '2', '3', '4', '5', '6']" 
                              @click="adminSelectGrade(grade)"
@@ -632,7 +724,7 @@
                     <button @click="adminBack()" class="arcade-btn text-lg py-2 px-4 mb-8">
                         &larr; BACK TO GRADES
                     </button>
-                    <h2 class="text-2xl md:text-4xl text-center mb-8">ADMIN STEP 2: SELECT SUBJECT</h2>
+                    <h2 class="text-2xl md:text-4xl text-center mb-8">STUDENT: STEP 2/3: SELECT SUBJECT</h2>
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-6 md:gap-8">
                         <div v-for="subject in subjects" 
                              @click="adminSelectSubject(subject)"
@@ -647,7 +739,7 @@
                     <button @click="adminBack()" class="arcade-btn text-lg py-2 px-4 mb-8">
                         &larr; BACK TO SUBJECTS
                     </button>
-                    <h2 class="text-2xl md:text-4xl text-center mb-8">SUBMIT YOUR MASTERPIECE!</h2>
+                    <h2 class="text-2xl md:text-4xl text-center mb-8">STUDENT: STEP 3/3: SUBMIT GAME!</h2>
                     
                     <form @submit.prevent="submitGame" class="w-full max-w-lg bg-black bg-opacity-70 p-8 rounded-lg shadow-xl mx-auto border-4 border-lime-500">
                         <!-- Grade Level (Disabled) -->
@@ -738,17 +830,190 @@
                     </form>
                 </div>
             </div>
+
+            <!-- 
+              ==========================
+              *** NEW *** ADMIN MANAGEMENT PAGE
+              ========================== 
+            -->
+            <div v-if="page === 'adminManage'">
+                <div v-if="isAdmin">
+                    <div class="flex flex-col sm:flex-row justify-between items-center mb-8 gap-4">
+                        <h2 class="text-2xl md:text-4xl">ADMIN PORTAL</h2>
+                        <div class="flex-shrink-0">
+                            <button @click="goToStudentForm()" class="arcade-btn text-base py-3 px-5 mr-4">
+                                ADD NEW GAME
+                            </button>
+                            <button @click="logoutAdmin()" class="arcade-btn text-base py-3 px-5 bg-red-600">
+                                LOG OUT
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Admin Game List Table -->
+                    <div class="bg-black bg-opacity-70 p-4 rounded-lg shadow-xl border-4 border-lime-500 overflow-x-auto">
+                        <table class="w-full min-w-[800px] text-left" style="font-family: 'VT323', monospace; font-size: 1.15rem;">
+                            <thead>
+                                <tr class="border-b border-lime-500">
+                                    <th class="p-4">Game Name</th>
+                                    <th class="p-4">Grade</th>
+                                    <th class="p-4">Subject</th>
+                                    <th class="p-4">Creator</th>
+                                    <th class="p-4">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-if="!isAuthReady" class="border-t border-gray-700">
+                                    <td colspan="5" class="p-4 text-center text-cyan-400 animate-pulse">LOADING...</td>
+                                </tr>
+                                <tr v-else-if="games.length === 0" class="border-t border-gray-700">
+                                    <td colspan="5" class="p-4 text-center text-pink-400">NO GAMES IN DATABASE.</td>
+                                </tr>
+                                <tr v-for="game in games" :key="game.id" class="border-t border-gray-700 hover:bg-gray-900">
+                                    <td class="p-3 text-cyan-400 font-bold">{{ game.gameName }}</td>
+                                    <td class="p-3">{{ game.gradeLevel }}</td>
+                                    <td class="p-3">{{ game.subject }}</td>
+                                    <td class="p-3 text-gray-400">{{ game.creatorName }}</td>
+                                    <td class="p-3 whitespace-nowrap">
+                                        <button @click="openEditModal(game)" class="arcade-btn text-sm py-1 px-3 bg-blue-600 mr-2">
+                                            EDIT
+                                        </button>
+                                        <button @click="openDeleteModal(game)" class="arcade-btn text-sm py-1 px-3 bg-red-600">
+                                            DELETE
+                                        </button>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <!-- Security fallback -->
+                <div v-else>
+                    <h2 class="text-2xl md:text-4xl text-center text-red-500">ACCESS DENIED</h2>
+                    <p class="text-center text-xl mt-4">You are not logged in as an administrator.</p>
+                    <div class="text-center mt-8">
+                        <button @click="goHome()" class="arcade-btn text-lg py-2 px-4">GO HOME</button>
+                    </div>
+                </div>
+            </div>
+
         </main>
 
         <!-- Custom Modal for Alerts (Arcade Style) --><div v-if="showAlert" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
             <div class="modal-arcade p-8 w-full max-w-lg text-center">
                 <h3 class="text-3xl mb-4">{{ alertTitle }}</h3>
                 <p class="text-xl leading-relaxed mb-8">{{ alertMessage }}</p>
-                <button @click="showAlert = false" class="arcade-btn py-3 px-6 text-xl">
+                <button @click="showAlert = false" class="arcade-btn py-3 px-6 text-xl bg-green-600">
                     CONTINUE
                 </button>
             </div>
         </div>
+
+        <!-- 
+          ==========================
+          *** NEW *** EDIT GAME MODAL
+          ========================== 
+        -->
+        <div v-if="isEditing" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
+            <!-- Modal content container -->
+            <div class="modal-arcade p-6 sm:p-8 w-full max-w-2xl text-left overflow-y-auto max-h-[90vh] relative">
+                <h3 class="text-3xl mb-6 text-center">EDIT GAME: {{ gameToEdit.gameName }}</h3>
+                
+                <form @submit.prevent="submitGameEdit" class="space-y-4">
+                    <!-- Game Name -->
+                    <div>
+                        <label class="form-label-arcade mb-2 block" for="editGameName">GAME NAME:</label>
+                        <input v-model="gameToEdit.gameName" class="form-input-arcade w-full" id="editGameName" type="text" required>
+                    </div>
+                    <!-- Creator Name -->
+                    <div>
+                        <label class="form-label-arcade mb-2 block" for="editCreatorName">CREATOR NAME:</label>
+                        <input v-model="gameToEdit.creatorName" class="form-input-arcade w-full" id="editCreatorName" type="text" required>
+                    </div>
+                    
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <!-- Grade Level -->
+                        <div>
+                            <label class="form-label-arcade mb-2 block" for="editGradeLevel">GRADE LEVEL:</label>
+                            <select v-model="gameToEdit.gradeLevel" id="editGradeLevel" class="form-input-arcade w-full" required>
+                                <option disabled value="">Select Grade</option>
+                                <option v-for="grade in ['K', '1', '2', '3', '4', '5', '6']" :value="grade">Level {{ grade }}</option>
+                            </select>
+                        </div>
+                        <!-- Subject -->
+                        <div>
+                            <label class="form-label-arcade mb-2 block" for="editSubject">SUBJECT:</label>
+                            <select v-model="gameToEdit.subject" id="editSubject" class="form-input-arcade w-full" required>
+                                <option disabled value="">Select Subject</option>
+                                <option v-for="subject in subjects" :value="subject">{{ subject }}</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Topic -->
+                    <div>
+                        <label class="form-label-arcade mb-2 block" for="editTopic">TOPIC / LESSON:</label>
+                        <input v-model="gameToEdit.topic" class="form-input-arcade w-full" id="editTopic" type="text" required>
+                    </div>
+                    <!-- Standard -->
+                    <div>
+                        <label class="form-label-arcade mb-2 block" for="editStandard">STANDARD:</label>
+                        <input v-model="gameToEdit.standard" class="form-input-arcade w-full" id="editStandard" type="text" required>
+                    </div>
+                    <!-- Description -->
+                    <div>
+                        <label class="form-label-arcade mb-2 block" for="editDescription">DESCRIPTION:</label>
+                        <textarea v-model="gameToEdit.description" class="form-input-arcade w-full" id="editDescription" rows="3" required></textarea>
+                    </div>
+                    <!-- Game Link -->
+                    <div>
+                        <label class="form-label-arcade mb-2 block" for="editGameLink">GAME LINK (URL):</label>
+                        <input v-model="gameToEdit.gameLink" class="form-input-arcade w-full" id="editGameLink" type="url" required>
+                    </div>
+                    <!-- Thumbnail URL -->
+                    <div>
+                        <label class="form-label-arcade mb-2 block" for="editThumbnailUrl">THUMBNAIL IMAGE URL:</label>
+                        <input v-model="gameToEdit.thumbnailUrl" class="form-input-arcade w-full" id="editThumbnailUrl" type="url" required>
+                    </div>
+
+                    <!-- Action Buttons -->
+                    <div class="flex flex-col sm:flex-row justify-end items-center pt-6 space-y-4 sm:space-y-0 sm:space-x-4">
+                        <button @click="closeEditModal" type="button" class="arcade-btn py-3 px-6 text-xl bg-gray-600 w-full sm:w-auto">
+                            CANCEL
+                        </button>
+                        <button type="submit" class="arcade-btn py-3 px-6 text-xl bg-green-600 w-full sm:w-auto">
+                            SAVE CHANGES
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- 
+          ==========================
+          *** NEW *** DELETE CONFIRM MODAL
+          ========================== 
+        -->
+        <div v-if="isDeleting" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
+            <div class="modal-arcade p-8 w-full max-w-lg text-center">
+                <h3 class="text-3xl mb-4 text-red-400">DELETE GAME?</h3>
+                <p class="text-xl leading-relaxed mb-8">
+                    Are you sure you want to permanently delete
+                    <strong class="text-cyan-400">{{ gameToDelete.gameName }}</strong>?
+                    <br>
+                    This action cannot be undone.
+                </p>
+                <div class="flex flex-col sm:flex-row justify-center items-center pt-6 space-y-4 sm:space-y-0 sm:space-x-6">
+                    <button @click="closeDeleteModal" class="arcade-btn py-3 px-6 text-xl bg-gray-600 w-full sm:w-auto">
+                        CANCEL
+                    </button>
+                    <button @click="confirmDeleteGame" class="arcade-btn py-3 px-6 text-xl bg-red-600 w-full sm:w-auto">
+                        CONFIRM DELETE
+                    </button>
+                </div>
+            </div>
+        </div>
+
 
     </div> <!-- End #app --></body>
 </html>
